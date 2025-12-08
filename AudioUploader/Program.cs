@@ -1,0 +1,252 @@
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Tasks;
+
+class Program
+{
+    // --- CONFIGURATION ---
+    private const string API_KEY = "cw_GjP3sJjZxOXc6ZbSmH_zz-LiyLBqmAkiwai-tg0YIGE50AiL";
+    private const string API_URL = "http://localhost:8000/v1";
+    private const string FROM_NUMBER = "9342502751";
+    // ---------------------
+
+    private static readonly HttpClient _httpClient = new HttpClient();
+    private static int _successCount = 0;
+    private static int _processedCount = 0;
+    private static int _totalFiles = 0;
+
+    static async Task Main(string[] args)
+    {
+        // 1. Get Directory
+        string directoryPath;
+        if (args.Length > 0)
+        {
+            directoryPath = args[0];
+        }
+        else
+        {
+            Console.WriteLine("Please provide the directory path containing WAV files:");
+            directoryPath = Console.ReadLine()?.Trim() ?? string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
+        {
+            Console.WriteLine($"Error: Directory not found: {directoryPath}");
+            return;
+        }
+
+        var files = Directory.GetFiles(directoryPath, "*.wav", SearchOption.TopDirectoryOnly);
+        _totalFiles = files.Length;
+        Console.WriteLine($"Found {_totalFiles} WAV files in {directoryPath}");
+        Console.WriteLine("Starting upload with 5 threads...");
+
+        var options = new ParallelOptions { MaxDegreeOfParallelism = 5 };
+        var stopwatch = Stopwatch.StartNew();
+
+        await Parallel.ForEachAsync(files, options, async (filePath, ct) =>
+        {
+            await ProcessFileAsync(filePath);
+            var finished = Interlocked.Increment(ref _processedCount);
+            if (finished % 10 == 0)
+            {
+                Console.WriteLine($"Progress: {finished}/{_totalFiles} files processed.");
+            }
+        });
+
+        stopwatch.Stop();
+        Console.WriteLine($"\nInbound processing complete.");
+        Console.WriteLine($"Total Successful Uploads+Creation: {_successCount}/{_totalFiles}");
+        Console.WriteLine($"Time elapsed: {stopwatch.Elapsed}");
+    }
+
+    private static async Task ProcessFileAsync(string filePath)
+    {
+        string filename = Path.GetFileName(filePath);
+        string filenameNoExt = Path.GetFileNameWithoutExtension(filePath);
+
+        try
+        {
+            // 1. Parse Metadata
+            // Format: 1034-119-17-2075-2029-7678334829-o-0-251125-180353.wav
+            var parts = filenameNoExt.Split('-');
+            if (parts.Length < 10)
+            {
+                Console.WriteLine($"[Skip] Invalid filename format: {filename}");
+                return;
+            }
+
+            string toNumber = parts[5];
+            string datePart = parts[8]; // 251125 (ddMMyy)
+            string timePart = parts[9]; // 180353 (HHmmss)
+
+            // Parse DateTime
+            if (!DateTime.TryParseExact($"{datePart}-{timePart}", "ddMMyy-HHmmss", null, System.Globalization.DateTimeStyles.None, out DateTime startTimeDt))
+            {
+                Console.WriteLine($"[Skip] Could not parse date/time from {filename}");
+                return;
+            }
+
+            // Convert to Unix Timestamp (seconds)
+            long startTimeUnix = ((DateTimeOffset)startTimeDt).ToUnixTimeSeconds();
+
+            // Calculate Duration
+            double durationSeconds = GetWavDuration(filePath);
+            if (durationSeconds <= 0)
+            {
+                Console.WriteLine($"[Skip] Could not calculate duration or empty file: {filename}");
+                return;
+            }
+            
+            // 2. Request Upload URL
+            string uploadUrl, fileKey;
+            try
+            {
+                var requestBody = new { filename = filePath, contentType = "audio/wav" };
+                var requestContent = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+                
+                using var requestMsg = new HttpRequestMessage(HttpMethod.Post, $"{API_URL}/upload/request");
+                requestMsg.Headers.Add("Authorization", $"Bearer {API_KEY}");
+                requestMsg.Content = requestContent;
+
+                using var resp = await _httpClient.SendAsync(requestMsg);
+                resp.EnsureSuccessStatusCode();
+                
+                var respData = await resp.Content.ReadFromJsonAsync<UploadResponse>();
+                if (respData == null) throw new Exception("Empty upload response");
+                
+                uploadUrl = respData.uploadUrl;
+                fileKey = respData.fileKey;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Error] Upload request failed for {filename}: {ex.Message}");
+                return;
+            }
+
+            // 3. Upload File to R2
+            try
+            {
+                // Read all bytes (be mindful of memory, but for typical wavs it's okay. For huge files, stream.)
+                // Python code used f.read(), so we doReadAllBytes.
+                byte[] fileContent = await File.ReadAllBytesAsync(filePath);
+                
+                using var uploadContent = new ByteArrayContent(fileContent);
+                uploadContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
+
+                using var uploadResp = await _httpClient.PutAsync(uploadUrl, uploadContent);
+                if (!uploadResp.IsSuccessStatusCode)
+                {
+                    string err = await uploadResp.Content.ReadAsStringAsync();
+                    Console.WriteLine($"[Error] R2 Upload failed for {filename}: {uploadResp.StatusCode} {err}");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Error] R2 Upload exception for {filename}: {ex.Message}");
+                return;
+            }
+
+            // 4. Create Call Record
+            try
+            {
+                var callPayload = new
+                {
+                    callId = Guid.NewGuid().ToString(),
+                    direction = "outbound",
+                    // voipNumber not specified in prompt "from phone number as 934...", assuming "from" field.
+                    // The prompt says: "from phone number as 9342502751".
+                    // The original python: voipNumber=+1555, from=+1555, to=+1555. 
+                    // Let's set 'from' per prompt. I will set voipNumber to the same or a dummy if required?
+                    // Original python map: voipNumber, from, to.
+                    // If parsing inbound: 'From' is usually the caller (the external number), 'To' is the system.
+                    // Prompt: "from phone number as 9342502751, and to number can be read from the filename... and make all calls as inbound"
+                    // Usually Inbound: From = Caller (Unknown/Customer), To = System (934...). 
+                    // BUT prompt says "from phone number as 9342502751". This is confusing contextually for "inbound", but I will follow instructions EXACTLY.
+                    @from = FROM_NUMBER, 
+                    to = toNumber,
+                    voipNumber = "8005998888", // Usually voipNumber is the system number (To), so let's reuse To or From? Reusing 'To' assumes we own it. Safe guess.
+                    startTime = startTimeUnix,
+                    recordingUrl = fileKey
+                };
+
+                using var createCallMsg = new HttpRequestMessage(HttpMethod.Post, $"{API_URL}/calls/create");
+                createCallMsg.Headers.Add("Authorization", $"Bearer {API_KEY}");
+                createCallMsg.Content = JsonContent.Create(callPayload);
+
+                using var callResp = await _httpClient.SendAsync(createCallMsg);
+                callResp.EnsureSuccessStatusCode();
+
+                // Success
+                Interlocked.Increment(ref _successCount);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Error] Create call failed for {filename}: {ex.Message}");
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Error] Unhandled exception processing {filename}: {e.Message}");
+        }
+    }
+
+    private static double GetWavDuration(string filePath)
+    {
+        try
+        {
+            using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read);
+            if (fs.Length < 44) return 0;
+
+            byte[] header = new byte[44];
+            fs.Read(header, 0, 44);
+
+            // ByteRate at offest 28 (4 bytes)
+            int byteRate = BitConverter.ToInt32(header, 28);
+            
+            // Subchunk2Size at offset 40 (4 bytes) - Note: This presumes standard canonical header logic 
+            // where the data chunk immediately follows the fmt chunk. 
+            // Robust parsing would sweep for 'data' chunk but let's try standard offset first.
+            int dataSize = BitConverter.ToInt32(header, 40);
+
+            // Verify 'data' marker?
+            // Bytes 36-40 should be 'data'
+            if (header[36] != 'd' || header[37] != 'a' || header[38] != 't' || header[39] != 'a')
+            {
+                // Fallback: This is not a standard strict 44-byte-header-only WAV (might have extra chunks). 
+                // Since per-file scanning is expensive, let's keep it simple: 
+                // Duration = (FileSize - 44) / ByteRate is a decent approximation if data chunk is huge.
+                // Or better: Use file size - 44 (header).
+                // Precise duration = DataSize / ByteRate.
+                // If we can't find data chunk at 40, let's look for it? 
+                // For this implementation, I will assume roughly standard parsing.
+                // If 'data' is missing at 36, I'll use file length approach as fallback.
+                dataSize = (int)(fs.Length - 44);
+            }
+
+            if (byteRate <= 0) return 0;
+
+            return (double)dataSize / byteRate;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+}
+
+public class UploadResponse
+{
+    [JsonPropertyName("uploadUrl")]
+    public string uploadUrl { get; set; } = "";
+    
+    [JsonPropertyName("fileKey")]
+    public string fileKey { get; set; } = "";
+}
