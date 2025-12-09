@@ -125,7 +125,8 @@ class Program
                 if (!resp.IsSuccessStatusCode)
                 {
                     string errorBody = await resp.Content.ReadAsStringAsync();
-                    Console.WriteLine($"[Error] Upload request failed for {filename}: {resp.StatusCode} - {errorBody}");
+                    string errorDetail = GetErrorDetail(errorBody);
+                    Console.WriteLine($"[Error] Upload request failed for {filename}: {resp.StatusCode} - {errorDetail}");
                     return;
                 }
                 
@@ -151,7 +152,11 @@ class Program
                 using var uploadContent = new ByteArrayContent(fileContent);
                 uploadContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
 
+                var r2Stopwatch = Stopwatch.StartNew();
                 using var uploadResp = await _httpClient.PutAsync(uploadUrl, uploadContent);
+                r2Stopwatch.Stop();
+                double sizeMb = fileContent.Length / (1024.0 * 1024.0);
+                Console.WriteLine($"[Time] R2 Upload for {filename} ({sizeMb:F2} MB) took {r2Stopwatch.ElapsedMilliseconds} ms. Speed: {sizeMb / r2Stopwatch.Elapsed.TotalSeconds:F2} MB/s");
                 if (!uploadResp.IsSuccessStatusCode)
                 {
                     string err = await uploadResp.Content.ReadAsStringAsync();
@@ -185,8 +190,17 @@ class Program
                 createCallMsg.Headers.Add("Authorization", $"Bearer {API_KEY}");
                 createCallMsg.Content = JsonContent.Create(callPayload);
 
+                var apiStopwatch = Stopwatch.StartNew();
                 using var callResp = await _httpClient.SendAsync(createCallMsg);
-                callResp.EnsureSuccessStatusCode();
+                apiStopwatch.Stop();
+                Console.WriteLine($"[Time] Create call API for {filename} took {apiStopwatch.ElapsedMilliseconds} ms");
+                if (!callResp.IsSuccessStatusCode)
+                {
+                    string errorBody = await callResp.Content.ReadAsStringAsync();
+                    string errorDetail = GetErrorDetail(errorBody);
+                    Console.WriteLine($"[Error] Create call failed for {filename}: {callResp.StatusCode} - {errorDetail}");
+                    return;
+                }
 
                 // Success
                 Interlocked.Increment(ref _successCount);
@@ -200,6 +214,20 @@ class Program
         {
             Console.WriteLine($"[Error] Unhandled exception processing {filename}: {e.Message}");
         }
+    }
+
+    private static string GetErrorDetail(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("detail", out var detail))
+            {
+                return detail.ToString();
+            }
+        }
+        catch { }
+        return json;
     }
 
     private static double GetWavDuration(string filePath)
