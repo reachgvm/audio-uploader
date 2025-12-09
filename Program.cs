@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 class Program
 {
     // --- CONFIGURATION ---
-    private const string API_KEY = "cw_GjP3sJjZxOXc6ZbSmH_zz-LiyLBqmAkiwai-tg0YIGE50AiL";
+    private const string API_KEY = "cw_RqpjDhMN05kB2hiywHaylH5sCDzbOWoho40aExnC-L_NGAJx";
     private const string API_URL = "http://localhost:8000/v1";
     private const string FROM_NUMBER = "9342502751";
     // ---------------------
@@ -93,8 +93,7 @@ class Program
                 return;
             }
 
-            // Convert to Unix Timestamp (seconds)
-            long startTimeUnix = ((DateTimeOffset)startTimeDt).ToUnixTimeSeconds();
+
 
             // Calculate Duration
             double durationSeconds = GetWavDuration(filePath);
@@ -104,11 +103,18 @@ class Program
                 return;
             }
             
+            // Calculate ISO Times
+            var startUtc = DateTime.SpecifyKind(startTimeDt, DateTimeKind.Utc);
+            var endUtc = startUtc.AddSeconds(durationSeconds);
+
+            string startTimeIso = startUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            string endTimeIso = endUtc.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
             // 2. Request Upload URL
             string uploadUrl, fileKey;
             try
             {
-                var requestBody = new { filename = filePath, contentType = "audio/wav" };
+                var requestBody = new { fileName = filename, contentType = "audio/wav" };
                 var requestContent = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
                 
                 using var requestMsg = new HttpRequestMessage(HttpMethod.Post, $"{API_URL}/upload/request");
@@ -116,7 +122,12 @@ class Program
                 requestMsg.Content = requestContent;
 
                 using var resp = await _httpClient.SendAsync(requestMsg);
-                resp.EnsureSuccessStatusCode();
+                if (!resp.IsSuccessStatusCode)
+                {
+                    string errorBody = await resp.Content.ReadAsStringAsync();
+                    Console.WriteLine($"[Error] Upload request failed for {filename}: {resp.StatusCode} - {errorBody}");
+                    return;
+                }
                 
                 var respData = await resp.Content.ReadFromJsonAsync<UploadResponse>();
                 if (respData == null) throw new Exception("Empty upload response");
@@ -160,20 +171,13 @@ class Program
                 var callPayload = new
                 {
                     callId = Guid.NewGuid().ToString(),
-                    direction = "outbound",
-                    // voipNumber not specified in prompt "from phone number as 934...", assuming "from" field.
-                    // The prompt says: "from phone number as 9342502751".
-                    // The original python: voipNumber=+1555, from=+1555, to=+1555. 
-                    // Let's set 'from' per prompt. I will set voipNumber to the same or a dummy if required?
-                    // Original python map: voipNumber, from, to.
-                    // If parsing inbound: 'From' is usually the caller (the external number), 'To' is the system.
-                    // Prompt: "from phone number as 9342502751, and to number can be read from the filename... and make all calls as inbound"
-                    // Usually Inbound: From = Caller (Unknown/Customer), To = System (934...). 
-                    // BUT prompt says "from phone number as 9342502751". This is confusing contextually for "inbound", but I will follow instructions EXACTLY.
+                    direction = "inbound",
                     @from = FROM_NUMBER, 
                     to = toNumber,
-                    voipNumber = "8005998888", // Usually voipNumber is the system number (To), so let's reuse To or From? Reusing 'To' assumes we own it. Safe guess.
-                    startTime = startTimeUnix,
+                    voipNumber = "8005998888", 
+                    startTime = startTimeIso,
+                    endTime = endTimeIso,
+                    status = "completed",
                     recordingUrl = fileKey
                 };
 
