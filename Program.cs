@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 class Program
 {
     // --- CONFIGURATION ---
-    private const string API_KEY = "";
+    private const string API_KEY = "cw_GGIKmVnh44_yIDG1tyH6C50pYOtnkgWAEBfsIfeQMgc5i0nE";
     private const string API_URL = "https://api.comswise.in/v1";
     private const string FROM_NUMBER = "9342502751";
     // ---------------------
@@ -24,18 +24,80 @@ class Program
 
     static async Task Main(string[] args)
     {
-        // 1. Get Directory
-        string directoryPath;
+        string command = "";
+        string argPath = "";
+
         if (args.Length > 0)
         {
-            directoryPath = args[0];
+            if (args[0].Equals("download", StringComparison.OrdinalIgnoreCase))
+            {
+                command = "download";
+            }
+            else if (args[0].Equals("process_audio_files", StringComparison.OrdinalIgnoreCase))
+            {
+                command = "process_audio_files";
+                if (args.Length > 1) argPath = args[1];
+            }
+            else
+            {
+                // Fallback for backward compatibility or direct path usage
+                // Checks if the first argument looks like a path
+                if (Directory.Exists(args[0]) || args[0].Contains("/") || args[0].Contains("\\"))
+                {
+                     command = "process_audio_files";
+                     argPath = args[0];
+                }
+            }
+        }
+
+        if (string.IsNullOrEmpty(command))
+        {
+            Console.WriteLine("Please select a mode:");
+            Console.WriteLine("1. Enter 'download' to fetch transcripts.");
+            Console.WriteLine("2. Enter 'process_audio_files' (or a directory path) to upload audio.");
+            Console.Write("> ");
+            var input = Console.ReadLine()?.Trim() ?? string.Empty;
+            
+            if (input.Equals("download", StringComparison.OrdinalIgnoreCase))
+            {
+                command = "download";
+            }
+            else if (input.StartsWith("process_audio_files", StringComparison.OrdinalIgnoreCase))
+            {
+                 command = "process_audio_files";
+                 var parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
+                 if (parts.Length > 1) argPath = parts[1];
+            }
+            else
+            {
+                 // Assume path
+                 command = "process_audio_files";
+                 argPath = input;
+            }
+        }
+
+        if (command == "download")
+        {
+            await DownloadTranscriptsSummary.FetchAndProcess(API_KEY, API_URL);
+        }
+        else if (command == "process_audio_files")
+        {
+            if (string.IsNullOrWhiteSpace(argPath))
+            {
+                Console.WriteLine("Please provide the directory path containing WAV files:");
+                argPath = Console.ReadLine()?.Trim() ?? string.Empty;
+            }
+            
+            await ProcessDirectory(argPath);
         }
         else
         {
-            Console.WriteLine("Please provide the directory path containing WAV files:");
-            directoryPath = Console.ReadLine()?.Trim() ?? string.Empty;
+             Console.WriteLine("Invalid command or input.");
         }
+    }
 
+    private static async Task ProcessDirectory(string directoryPath)
+    {
         if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
         {
             Console.WriteLine($"Error: Directory not found: {directoryPath}");

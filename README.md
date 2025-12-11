@@ -16,18 +16,27 @@ The following settings are hardcoded in `Program.cs` and can be modified if need
 
 ## Usage
 
-1. Open a terminal in this directory.
-2. Run the application using `dotnet run` followed by the path to the directory containing your WAV files.
+### Processing Audio Files
+To process and upload audio files, use the `process_audio_files` command followed by the directory path:
 
 ```bash
-dotnet run -- "/path/to/your/wav_files_directory"
+dotnet run -- process_audio_files /path/to/wav/files
 ```
 
-### Example
+If you omit the directory, you will be prompted to enter it:
 
 ```bash
-dotnet run -- "/Users/gvinay/workplace/matrixbps/RECODINGS/SMARTU"
+dotnet run -- process_audio_files
 ```
+
+### Downloading Transcripts
+To download transcripts and summaries for existing calls:
+
+```bash
+dotnet run -- download
+```
+
+This will fetch calls from the API and save their transcripts (if available) as Markdown files in the `transcripts_download` directory.
 
 ## Features
 
