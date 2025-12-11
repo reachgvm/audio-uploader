@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 class Program
 {
     // --- CONFIGURATION ---
-    private const string API_KEY = "cw_GGIKmVnh44_yIDG1tyH6C50pYOtnkgWAEBfsIfeQMgc5i0nE";
+    private const string API_KEY = "";
     private const string API_URL = "https://api.comswise.in/v1";
     private const string FROM_NUMBER = "9342502751";
     // ---------------------
