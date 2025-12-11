@@ -12,8 +12,8 @@ using System.Threading.Tasks;
 class Program
 {
     // --- CONFIGURATION ---
-    private const string API_KEY = "cw_RqpjDhMN05kB2hiywHaylH5sCDzbOWoho40aExnC-L_NGAJx";
-    private const string API_URL = "http://localhost:8000/v1";
+    private const string API_KEY = "";
+    private const string API_URL = "https://api.comswise.in/v1";
     private const string FROM_NUMBER = "9342502751";
     // ---------------------
 
